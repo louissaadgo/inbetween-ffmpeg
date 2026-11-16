@@ -1,8 +1,12 @@
 # Builds FFmpeg for Inbetween and publishes it: pushing a tag v<VERSION>
-# (VERSION's) makes a GitHub release holding the Windows zip, its complete
-# source (every source archive and build.sh) and SHA256SUMS. Run by hand
-# (Actions › release › Run workflow), it only builds, and keeps out/ as the
-# run's artifact.
+# (VERSION's) makes a GitHub release holding the Windows zip, the macOS zip
+# (universal: Apple silicon and Intel), their complete source (every source
+# archive and build.sh) and SHA256SUMS. Run by hand (Actions › release ›
+# Run workflow), it only builds, and keeps the release's files as the run's
+# artifact "inbetween-ffmpeg".
+#
+# Windows is cross-built on Ubuntu; macOS is built natively on a Mac of each
+# kind, then joined into universal programs on another.
 name: release
 on:
   push:
@@ -11,7 +15,7 @@ on:
 permissions:
   contents: write
 jobs:
-  build:
+  windows:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -27,8 +31,88 @@ jobs:
       - name: Keep the build
         uses: actions/upload-artifact@v4
         with:
-          name: inbetween-ffmpeg
+          name: windows
           path: out/
+
+  macos-arch:
+    name: macos-${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install nasm meson ninja make
+          command -v pkg-config || brew install pkgconf
+      - name: Build
+        run: |
+          [ "$(uname -m)" = "${{ matrix.arch }}" ] || { echo "this runner is $(uname -m), not ${{ matrix.arch }}" >&2; exit 1; }
+          ./build.sh macos
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: out/macos-${{ matrix.arch }}/
+
+  macos:
+    needs: macos-arch
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: in/macos-arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-x86_64
+          path: in/macos-x86_64
+      - name: Universal zip
+        run: ./build.sh macos-zip in/macos-arm64 in/macos-x86_64
+      - name: Keep the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/inbetween-ffmpeg-*-macos.zip
+
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: out
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: out
+      - name: Sums and notes for both
+        run: |
+          ./build.sh notes
+          cat out/RELEASE-NOTES.md out/SHA256SUMS
+      - name: Keep the release's files
+        uses: actions/upload-artifact@v4
+        with:
+          name: inbetween-ffmpeg
+          path: |
+            out/*.zip
+            out/*.tar
+            out/SHA256SUMS
+            out/RELEASE-NOTES.md
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
